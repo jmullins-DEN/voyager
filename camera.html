@@ -116,16 +116,6 @@ html, body { background: #0f1f3d; color: #e8edf5; font-family: 'Barlow', sans-se
     <div class="kpi k4"><div class="klbl">Most Common Event</div><div class="kval" id="kMC" style="font-size:28px;padding-top:6px;line-height:1.2;">--</div><div class="ksub" id="kMT">--</div></div>
   </div>
 
-  <!-- Driver Group Filter -->
-  <div class="card" style="padding:12px 16px;background:linear-gradient(135deg,#0d1f3c,#162840);border-color:rgba(232,160,32,0.2);">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:#7a94b4;margin-right:2px;font-family:'Barlow Condensed',sans-serif;">Driver Group:</span>
-      <button class="group-btn active-all" data-group="all" id="grpAll">All Drivers <span class="group-badge" id="grpAllCt">--</span></button>
-      <button class="group-btn" data-group="HD" id="grpHD">&#9651; Heavy Duty <span class="group-badge" id="grpHDCt">--</span></button>
-      <button class="group-btn" data-group="LD" id="grpLD">&#9661; Light Duty <span class="group-badge" id="grpLDCt">--</span></button>
-      <div style="margin-left:auto;font-size:9px;color:#4a6480;font-style:italic;">TT vehicles = Heavy Duty</div>
-    </div>
-  </div>
 
   <div class="card" style="padding:12px 16px;">
     <div class="filter-bar" id="filterBar">
@@ -401,32 +391,43 @@ function render(evts){
     document.getElementById('kMT').innerHTML='<b>'+topCount+'</b> events';
   }
 
-  // Bar chart by week — fill the entire active window so every week in the
-  // 30-day period shows up, even ones with zero events.
-  var wk={};
-  evts.forEach(function(e){
-    if(!e._d)return;
-    var sun=new Date(e._d.getFullYear(),e._d.getMonth(),e._d.getDate());
-    sun.setDate(sun.getDate()-sun.getDay());
-    var mo=sun.getMonth()+1,dy=sun.getDate();
-    var k=(mo<10?'0':'')+mo+'/'+(dy<10?'0':'')+dy;
-    wk[k]=(wk[k]||0)+1;
-  });
-  var wkeys;
+  // Bar chart by 7-day bucket, anchored to the window start so labels
+  // exactly match the 28-day window (4 weekly buckets, e.g. 04/16, 04/23, 04/30, 05/07
+  // — never an out-of-window Sunday). The last bucket may be partial.
+  var wk={}, wkeys=[];
   if(windowStartD&&windowEndD){
-    // Walk Sunday-by-Sunday from window start to window end
-    var cursor=new Date(windowStartD.getFullYear(),windowStartD.getMonth(),windowStartD.getDate());
-    cursor.setDate(cursor.getDate()-cursor.getDay()); // back up to Sunday
-    var stop=new Date(windowEndD.getFullYear(),windowEndD.getMonth(),windowEndD.getDate());
-    wkeys=[];
-    while(cursor<=stop){
-      var mo2=cursor.getMonth()+1,dy2=cursor.getDate();
+    var startMid=new Date(windowStartD.getFullYear(),windowStartD.getMonth(),windowStartD.getDate());
+    var stopMid =new Date(windowEndD.getFullYear(),  windowEndD.getMonth(),  windowEndD.getDate());
+    // Pre-create one bucket per 7-day chunk
+    var cursor=new Date(startMid.getTime());
+    while(cursor<=stopMid){
+      var mo2=cursor.getMonth()+1, dy2=cursor.getDate();
       var k2=(mo2<10?'0':'')+mo2+'/'+(dy2<10?'0':'')+dy2;
       wkeys.push(k2);
-      if(!(k2 in wk)) wk[k2]=0;
+      wk[k2]=0;
       cursor.setDate(cursor.getDate()+7);
     }
+    // Drop each event into its anchored bucket
+    var msPerDay=86400000;
+    evts.forEach(function(e){
+      if(!e._d)return;
+      var evMid=new Date(e._d.getFullYear(),e._d.getMonth(),e._d.getDate());
+      var diffDays=Math.floor((evMid-startMid)/msPerDay);
+      if(diffDays<0)return;
+      var idx=Math.floor(diffDays/7);
+      if(idx>=wkeys.length)return;
+      wk[wkeys[idx]]++;
+    });
   } else {
+    // Fallback (no window set yet): keep old Sunday grouping
+    evts.forEach(function(e){
+      if(!e._d)return;
+      var sun=new Date(e._d.getFullYear(),e._d.getMonth(),e._d.getDate());
+      sun.setDate(sun.getDate()-sun.getDay());
+      var mo=sun.getMonth()+1,dy=sun.getDate();
+      var k=(mo<10?'0':'')+mo+'/'+(dy<10?'0':'')+dy;
+      wk[k]=(wk[k]||0)+1;
+    });
     wkeys=Object.keys(wk).sort();
   }
   drawBar('barWrap',wkeys,wkeys.map(function(k){return wk[k];}));
@@ -515,28 +516,23 @@ function saveStored(evts){
 
 
 function updateGroupCounts(base){
-  var all=base.length;
-  var hd=base.filter(function(e){return getDriverGroup(e)==='HD';}).length;
-  var ld=base.filter(function(e){return getDriverGroup(e)==='LD';}).length;
-  document.getElementById('grpAllCt').textContent=all;
-  document.getElementById('grpHDCt').textContent=hd;
-  document.getElementById('grpLDCt').textContent=ld;
+  // Driver-group filter removed for this client (no TT drivers) — no-op.
 }
 
 function renderWithDateFilter(allEvts){
-  // Rolling 30-day window with a 3-day grace period:
+  // Rolling 28-day window with a 3-day grace period:
   //   endDate   = today minus 3 days (end of day)   <- 3-day grace
-  //   startDate = endDate minus 30 days (start of day)
+  //   startDate = endDate minus 28 days (start of day)
   // Every visual on the page (KPIs, charts, drivers table, event log,
   // scorecards) is rendered off this filtered set so all areas show
-  // exactly the same 30-day window.
-  var BUFFER_DAYS=3, WINDOW_DAYS=30;
+  // exactly the same 28-day window.
+  var BUFFER_DAYS=3, WINDOW_DAYS=28;
   var today=new Date();
   var endD=new Date(today.getFullYear(),today.getMonth(),today.getDate());
   endD.setDate(endD.getDate()-BUFFER_DAYS);
   endD.setHours(23,59,59,999);
   var startD=new Date(endD.getFullYear(),endD.getMonth(),endD.getDate());
-  startD.setDate(startD.getDate()-WINDOW_DAYS);
+  startD.setDate(startD.getDate()-(WINDOW_DAYS-1));
   startD.setHours(0,0,0,0);
   var tr=allEvts.filter(function(e){
     if(!e._d) return false;
