@@ -202,7 +202,7 @@ html, body { background: #0f1f3d; color: #e8edf5; font-family: 'Barlow', sans-se
 // CLIENT CONFIGURATION — edit these two lines for each client
 // ============================================================
 var CLIENT_NAME = 'Voyager';
-var GITHUB_URL   = '';  // unused — data embedded below
+var GITHUB_URL   = 'https://github.com/jmullins-DEN/voyager';  // source repo; raw file URL is in GITHUB_XLSX_URL below
 // ============================================================
 
 var TC={'HARSH-BRAKE':'#e05252','HARSH_BRAKE':'#e05252','HARD-BRAKING':'#e05252','HARD_BRAKING':'#e05252','SIGN-VIOLATION':'#f5a623','SIGN_VIOLATION':'#f5a623','SIGN-VIOLATIONS':'#f5a623','SIGN_VIOLATIONS':'#f5a623','FOLLOWING-DISTANCE':'#5b8dee','FOLLOWING_DISTANCE':'#5b8dee','AGGREGATED_LANE_SWERVING':'#e056d6','AGGREGATED-LANE-SWERVING':'#e056d6','LANE-DEPARTURE':'#9b59b6','LANE_DEPARTURE':'#9b59b6','FORWARD-CAMERA-OBSTRUCTION':'#7a94b4','FORWARD_CAMERA_OBSTRUCTION':'#7a94b4','BACKING':'#e8943a','BACKING_EVENT':'#e8943a','DRIVER-DROWSINESS':'#8e5ea2','DRIVER_DROWSINESS':'#8e5ea2','DRIVER-DISTRACTION':'#c0392b','DRIVER_DISTRACTION':'#c0392b','SPEEDING-VIOLATIONS':'#e74c3c','SPEEDING_VIOLATIONS':'#e74c3c','SPEEDING-VIOLATION':'#e74c3c','SPEEDING_VIOLATION':'#e74c3c','HARD-TURN':'#16a085','HARD_TURN':'#16a085','TRAFFIC-LIGHT-VIOLATION':'#d35400','TRAFFIC_LIGHT_VIOLATION':'#d35400','DRIVER-STAR':'#f1c40f','DRIVER_STAR':'#f1c40f'};
@@ -247,21 +247,46 @@ TL['Forward Collision Warning']='Forward Collision Warning'; TL['FORWARD-COLLISI
 
 
 function parseDate(s){
-  if(!s)return null;
+  if(s==null||s==='')return null;
+  // 1) Already a JS Date (xlsx.js returns these when cellDates:true)
+  if(s instanceof Date){
+    return isNaN(s.getTime())?null:s;
+  }
+  // 2) Excel serial number (days since 1899-12-30, fractional = time-of-day)
+  if(typeof s==='number'&&isFinite(s)){
+    // Skip values that are clearly not date serials (e.g. tiny counts).
+    // Real dates from ~2000 onward map to serials >= 36526.
+    if(s>20000&&s<80000){
+      var ms=Math.round((s-25569)*86400*1000);
+      var d=new Date(ms);
+      return isNaN(d.getTime())?null:d;
+    }
+    return null;
+  }
   var str=String(s).trim();
-  // Try Samsara format: "MM/DD/YYYY HH:MM:SS AM/PM"
-  var m=str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)?)?/i);
+  if(!str)return null;
+  // 3) Samsara string format: "MM/DD/YYYY HH:MM:SS AM/PM"
+  var m=str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
   if(m){
-    var mo=parseInt(m[1]),day=parseInt(m[2]),yr=parseInt(m[3]);
+    var mo=parseInt(m[1],10),day=parseInt(m[2],10),yr=parseInt(m[3],10);
     if(yr<100)yr+=2000;
-    var hr=m[4]?parseInt(m[4]):0,mn=m[5]?parseInt(m[5]):0,sc=m[6]?parseInt(m[6]):0;
+    var hr=m[4]?parseInt(m[4],10):0,mn=m[5]?parseInt(m[5],10):0,sc=m[6]?parseInt(m[6],10):0;
     if(m[7]){
       var ap=m[7].toUpperCase();
       if(ap==='PM'&&hr<12)hr+=12;
       if(ap==='AM'&&hr===12)hr=0;
     }
-    return (isNaN(mo)||isNaN(day)||isNaN(yr))?null:new Date(yr,mo-1,day,hr,mn,sc);
+    if(isNaN(mo)||isNaN(day)||isNaN(yr))return null;
+    return new Date(yr,mo-1,day,hr,mn,sc);
   }
+  // 4) ISO 8601 ("2026-05-15", "2026-05-15T10:30:00Z", etc.)
+  if(/^\d{4}-\d{2}-\d{2}/.test(str)){
+    var d=new Date(str);
+    if(!isNaN(d.getTime()))return d;
+  }
+  // 5) Last resort — let the Date constructor try
+  var d2=new Date(str);
+  if(!isNaN(d2.getTime()))return d2;
   return null;
 }
 
@@ -327,6 +352,8 @@ var currentFilter='all';
 var allFilteredEvts=[];
 var currentGroup='all';
 var allBaseEvts=[];
+// Active date window — set by renderWithDateFilter so render() can fill empty weeks
+var windowStartD=null, windowEndD=null;
 
 function getDriverGroup(evt){
   var veh=String(evt.Vehicle||evt['Vehicle #']||evt.Unit||evt['Unit #']||evt.Truck||'').trim().toUpperCase();
@@ -359,7 +386,7 @@ function render(evts){
   document.getElementById('kT').textContent=evts.length;
   document.getElementById('kpiDateRange').innerHTML='<b>'+co+'</b> coached';
 
-  // KPI 2 — viewed % big, "X of Y viewed" sub (matches Apple)
+  // KPI 2 — viewed % big, "X of Y viewed" sub (matches reference layout)
   document.getElementById('kU').textContent=vr+'%';
   document.getElementById('kVR').innerHTML='<b>'+(co-uv)+'</b> of '+co+' viewed';
 
@@ -367,29 +394,47 @@ function render(evts){
   document.getElementById('kA').textContent=avg;
   document.getElementById('kAS').innerHTML='<b>'+dc+'</b> drivers coached';
 
-  // KPI 4 — event name big, count sub (matches Apple)
+  // KPI 4 — event name big, count sub (matches reference layout)
   if(topType){
     document.getElementById('kMC').style.cssText='font-size:28px;padding-top:6px;line-height:1.2;';
     document.getElementById('kMC').textContent=getLabel(topType);
     document.getElementById('kMT').innerHTML='<b>'+topCount+'</b> events';
   }
 
-  // Bar chart by week
+  // Bar chart by week — fill the entire active window so every week in the
+  // 30-day period shows up, even ones with zero events.
   var wk={};
   evts.forEach(function(e){
     if(!e._d)return;
-    var sun=new Date(e._d);sun.setDate(sun.getDate()-sun.getDay());
+    var sun=new Date(e._d.getFullYear(),e._d.getMonth(),e._d.getDate());
+    sun.setDate(sun.getDate()-sun.getDay());
     var mo=sun.getMonth()+1,dy=sun.getDate();
     var k=(mo<10?'0':'')+mo+'/'+(dy<10?'0':'')+dy;
     wk[k]=(wk[k]||0)+1;
   });
-  var wkeys=Object.keys(wk).sort();
+  var wkeys;
+  if(windowStartD&&windowEndD){
+    // Walk Sunday-by-Sunday from window start to window end
+    var cursor=new Date(windowStartD.getFullYear(),windowStartD.getMonth(),windowStartD.getDate());
+    cursor.setDate(cursor.getDate()-cursor.getDay()); // back up to Sunday
+    var stop=new Date(windowEndD.getFullYear(),windowEndD.getMonth(),windowEndD.getDate());
+    wkeys=[];
+    while(cursor<=stop){
+      var mo2=cursor.getMonth()+1,dy2=cursor.getDate();
+      var k2=(mo2<10?'0':'')+mo2+'/'+(dy2<10?'0':'')+dy2;
+      wkeys.push(k2);
+      if(!(k2 in wk)) wk[k2]=0;
+      cursor.setDate(cursor.getDate()+7);
+    }
+  } else {
+    wkeys=Object.keys(wk).sort();
+  }
   drawBar('barWrap',wkeys,wkeys.map(function(k){return wk[k];}));
 
   var tkeys=Object.keys(tct).sort(function(a,b){return tct[b]-tct[a];});
   drawDonut('donutWrap',tkeys.map(function(t){return getLabel(t);}),tkeys.map(function(t){return tct[t];}),tkeys.map(function(t){return getColor(t);}));
 
-  // Driver table — matches Apple: Driver / Total / Viewed columns
+  // Driver table — matches reference layout: Driver / Total / Viewed columns
   var dd={};
   for(var i=0;i<evts.length;i++){
     var e=evts[i];if(!e.Driver)continue;
@@ -429,7 +474,7 @@ function render(evts){
     row.addEventListener('click',function(){showDriverModal(this.getAttribute('data-name'));});
   });
 
-  // Event log — matches Apple: EventType bold + Driver · Date inline, 14px
+  // Event log — matches reference layout: EventType bold + Driver · Date inline, 14px
   var sorted=evts.slice().sort(function(a,b){return(b._d||0)-(a._d||0);}).slice(0,50);
   var lh='';
   sorted.forEach(function(e){
@@ -479,9 +524,12 @@ function updateGroupCounts(base){
 }
 
 function renderWithDateFilter(allEvts){
-  // Rolling 30-day window with a 3-day buffer:
-  // endDate   = today minus 3 days (end of day)
-  // startDate = endDate minus 30 days (start of day)
+  // Rolling 30-day window with a 3-day grace period:
+  //   endDate   = today minus 3 days (end of day)   <- 3-day grace
+  //   startDate = endDate minus 30 days (start of day)
+  // Every visual on the page (KPIs, charts, drivers table, event log,
+  // scorecards) is rendered off this filtered set so all areas show
+  // exactly the same 30-day window.
   var BUFFER_DAYS=3, WINDOW_DAYS=30;
   var today=new Date();
   var endD=new Date(today.getFullYear(),today.getMonth(),today.getDate());
@@ -491,13 +539,13 @@ function renderWithDateFilter(allEvts){
   startD.setDate(startD.getDate()-WINDOW_DAYS);
   startD.setHours(0,0,0,0);
   var tr=allEvts.filter(function(e){
-    var cv=e['Converted To Coaching'];
-    if(!(cv==='YES'||cv==='Yes')) return false;
     if(!e._d) return false;
     return e._d>=startD && e._d<=endD;
   });
   allBaseEvts=tr;
   allFilteredEvts=tr;
+  windowStartD=startD;
+  windowEndD=endD;
   updateGroupCounts(tr);
   applyGroupAndFilter();
   var fmt=function(x){return x.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});};
@@ -535,7 +583,7 @@ function processFile(file){
   var reader=new FileReader();
   reader.onload=function(ev){
     try{
-      var wb=XLSX.read(ev.target.result,{type:'array'});
+      var wb=XLSX.read(ev.target.result,{type:'array',cellDates:true});
       var ws=wb.Sheets[wb.SheetNames[0]];
       var raw=XLSX.utils.sheet_to_json(ws,{header:1});
       var hi=-1;
@@ -742,12 +790,15 @@ document.getElementById('driverModal').addEventListener('click', function(e) {
 var GITHUB_XLSX_URL = 'https://raw.githubusercontent.com/jmullins-DEN/voyager/main/camera_events.xlsx';
 
 function fetchAndMerge(onDone) {
-  // Always start fresh so a new GitHub commit is picked up
+  // Always start fresh so a new GitHub commit is picked up.
+  // We intentionally do NOT use localStorage as a fallback on load —
+  // every page open performs a network fetch against GitHub.
   try { localStorage.removeItem('den_events'); } catch(e) {}
   var st = document.getElementById('upSt');
-  if (st) { st.style.display = 'block'; st.textContent = 'Loading Samsara data from GitHub...'; }
+  if (st) { st.style.display = 'block'; st.textContent = 'Loading fresh Samsara data from GitHub...'; }
 
-  // Cache-buster query string so the browser/CDN doesn't serve a stale copy
+  // Cache-buster query string + no-store header so the browser/CDN
+  // can never serve a stale copy of the xlsx.
   var url = GITHUB_XLSX_URL + '?t=' + Date.now();
   fetch(url, { cache: 'no-store' })
     .then(function(resp){
@@ -755,7 +806,7 @@ function fetchAndMerge(onDone) {
       return resp.arrayBuffer();
     })
     .then(function(buf){
-      var wb = XLSX.read(buf, { type: 'array' });
+      var wb = XLSX.read(buf, { type: 'array', cellDates: true });
       var ws = wb.Sheets[wb.SheetNames[0]];
       var raw = XLSX.utils.sheet_to_json(ws, { header: 1 });
 
@@ -800,8 +851,16 @@ function fetchAndMerge(onDone) {
       }
 
       saveStored(newEvts);
-      renderWithDateFilter(newEvts);
-      if (st) st.textContent = '\u2713 Samsara data loaded from GitHub ('+newEvts.length+' total events)';
+      var shown = renderWithDateFilter(newEvts);
+      if (st) {
+        var now = new Date();
+        var hh = now.getHours(), mm = now.getMinutes();
+        var ampm = hh >= 12 ? 'PM' : 'AM';
+        var h12 = ((hh + 11) % 12) + 1;
+        var mmStr = (mm < 10 ? '0' : '') + mm;
+        st.textContent = '\u2713 Fresh from GitHub at ' + h12 + ':' + mmStr + ' ' + ampm
+          + '  \u2014  ' + shown + ' events in window (' + newEvts.length + ' total in file)';
+      }
       if (onDone) onDone();
     })
     .catch(function(err){
